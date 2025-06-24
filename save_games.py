@@ -6,6 +6,7 @@ import numpy as np
 import pygame
 import ale_py
 from stable_baselines3.common.atari_wrappers import AtariWrapper
+import os
 
 
 gym.register_envs(ale_py)
@@ -88,19 +89,16 @@ def play_game():
     display.start()
 
     env_name = 'SpaceInvadersNoFrameskip-v4'
-    normal_base_env = gym.make(env_name, render_mode="rgb_array")  # no render_mode here
-    base_env = AtariWrapper(normal_base_env)
-    wrapped_env = NormalizeInput(CustomPenaltyWrapper(base_env))
+    normal_base_env = gym.make(env_name, render_mode="human")  # no render_mode here
+    base_env = AtariWrapper(normal_base_env, frame_skip=8)
 
-    wrapped_env = Monitor(wrapped_env)
+    wrapped_env = Monitor(base_env)
 
     vec_env = DummyVecEnv([lambda: wrapped_env])
     vec_env = VecFrameStack(vec_env, n_stack=4)
 
     # Pygame Setup
     pygame.init()
-    screen_width, screen_height = 210, 160  # Atari native res
-    screen = pygame.display.set_mode((screen_width, screen_height))
     clock = pygame.time.Clock()
 
     # Key to action mapping
@@ -150,13 +148,6 @@ def play_game():
         # Render RGB frame from base env (unwrap vec_env)
         frame = normal_base_env.render()  # (H, W, C)
         # Pygame needs (W, H, C)
-        frame = np.transpose(frame, (1, 0, 2))
-        surface = pygame.surfarray.make_surface(frame)
-
-        # Display
-        screen.blit(surface, (0, 0))
-        pygame.display.flip()
-
         # Record transitions
         buffer["obs"].append(obs.copy())
         buffer["actions"].append(one_hot)
@@ -180,21 +171,19 @@ def play_game():
     print("✅ Saved buffer to data/human_penalized_buffer.npz")
 
 def test_game():
-    import gymnasium as gym
-    import time
+    os.environ['SDL_RENDER_DRIVER'] = 'software'
+    pygame.init()
+    screen = pygame.display.set_mode((400, 300))
+    pygame.display.set_caption("Test Window")
+    running = True
+    while running:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+        screen.fill((0, 0, 0))
+        pygame.display.flip()
+    pygame.quit()
 
-    env = gym.make("SpaceInvadersNoFrameskip-v4", render_mode="human")
-    obs, info = env.reset()
-
-    done = False
-    while not done:
-        print("Acciones posibles: 0=NOOP, 1=FIRE, 2=RIGHT, 3=LEFT, 4=RIGHT+FIRE, 5=LEFT+FIRE")
-        action = int(input("Ingresa acción (0-5): "))
-        obs, reward, terminated, truncated, info = env.step(action)
-        done = terminated or truncated
-        print(f"Recompensa: {reward}, Terminado: {terminated}, Truncado: {truncated}, Info: {info}")
-
-    env.close()
 
 if __name__ == "__main__":
-    play_game()
+    test_game()

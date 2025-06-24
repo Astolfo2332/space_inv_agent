@@ -1,151 +1,68 @@
-from PIL import Image
+import optuna
 import numpy as np
-import mlflow
 from stable_baselines3 import DQN
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 import torch.nn as nn
 import torch
 import os
-from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack, VecNormalize, VecEnvWrapper, VecMonitor
-from stable_baselines3.common.vec_env.vec_transpose import VecTransposeImage
+from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack
 from stable_baselines3.common.callbacks import ProgressBarCallback, BaseCallback
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.env_util import make_atari_env
-from gymnasium.wrappers import ClipReward
-
 import gymnasium as gym
-import ale_py
-from torchvision.models import mobilenet_v2
 from tqdm.auto import tqdm
 import mlflow
-import torchvision
-from torchvision import transforms
-import torch.nn.functional as F
 from stable_baselines3.common.atari_wrappers import AtariWrapper
-
-from collections import defaultdict
-
-
-def make_env():
-    gym.register_envs(ale_py)
-    class CustomPenaltyWrapper(gym.Wrapper):
-        def __init__(self, env):
-            super().__init__(env)
-            self.last_action = None
-            self.same_action_count = 0
-            self.last_lives = None
-            self.no_shoot_count = 0
-            self.no_score_count = 0
-            self.killing_streak = 0
-            self.tolerance_killing_streak = 5  # Tolerance for killing streak
-            self.survival_reward = 0
-
-            self.entropy_scale = 0.00001
-            self.action_counts = defaultdict(int)
-            self.total_actions = 0
-
-        def reset(self, **kwargs):
-            obs, info = self.env.reset(**kwargs)
-            self.last_action = None
-            self.same_action_count = 0
-            self.no_shoot_count = 0
-            self.no_score_count = 0
-            self.killing_streak = 0
-            self.tolerance_killing_streak = 5  # Reset tolerance
-            self.survival_reward = 0
-
-            return obs, info
-
-        def step(self, action):
-            obs, reward, terminated, truncated, info = self.env.step(action)
-            # print("initial_reward:", reward)
-
-            self.action_counts[action] += 1
-            self.total_actions += 1
-
-            p = self.action_counts[action] ** 2 / self.total_actions
-
-            reward -= self.entropy_scale * p
-
-            if reward == 0:
-                self.no_score_count += 1
-                self.tolerance_killing_streak -= 1
-                if self.tolerance_killing_streak == 0:
-                    self.killing_streak = 0
-                    self.tolerance_killing_streak = 5  # Reset tolerance
-            else:
-                self.no_score_count = 0
-                self.killing_streak += 1
-
-            # reward = reward * self.killing_streak
-
-            self.survival_reward += 1
-            if self.survival_reward > 50:
-                reward += 0.05
-                self.survival_reward = 0
-
-            if self.no_score_count >= 5:
-                reward -= 0.00005
-
-            # --- Penalty for repeated no-op
-            if action == 0:
-                if self.last_action == 0:
-                    self.same_action_count += 1
-                else:
-                    self.same_action_count = 1
-            else:
-                self.same_action_count = 0
-            self.last_action = action
-
-            if self.same_action_count >= 3:
-                reward -= 0.00005
-
-            # --- Penalty for not shooting for too long
-            if int(action) in [1, 4, 5]:  # shooting actions
-                self.no_shoot_count = 0
-            else:
-                self.no_shoot_count += 1
-                if self.no_shoot_count >= 10:
-                    reward -= 0.00007
-
-            reward = np.clip(reward, -1.0, 1.0)
-            # reward = np.tanh(reward)
-
-            return obs, reward, terminated, truncated, info
+import ale_py
 
 
+class DeepMindCNN(BaseFeaturesExtractor):
+    """
+    DeepMind-style CNN used in the original DQN paper (Mnih et al., 2015).
+    Input shape: (n_stack, 84, 84) → (4, 84, 84)
+    """
 
-    # Se usa la version sin skip de frames ya que el AtariWrapper lo hace
-    env_name = 'SpaceInvadersNoFrameskip-v4'
-    env = gym.make(env_name)
-    # En este caso el AtariWrapper hace lo mismo que Clipreward además de añadir el preprocesado de las imágenes
-    # Normalizamos las imágenes a 0-1
-    # env = NormalizeInput(env)
-    env = AtariWrapper(env, frame_skip=4)
-    normal_env_real = NormalizeInput(env)
-    pen_env = CustomPenaltyWrapper(normal_env_real)  # Añadimos el wrapper de penalización
+    def __init__(self, observation_space, features_dim=512):
+        # features_dim is the output of the last linear layer (fc1)
+        super().__init__(observation_space, features_dim)
 
-    # Train env con penalizaciones
-    env = Monitor(pen_env)
-    env = DummyVecEnv([lambda: env])  # Convertimos a un entorno vectorizado
-    # # # Se crea el entorno de vectores y se apilan los frames
-    env = VecFrameStack(env, 4)
+        # Check input shape
+        n_input_channels = observation_space.shape[0]  # e.g., 4 stacked grayscale frames
 
-    # Test env sin penalizaciones
-    normal_env = Monitor(normal_env_real)
-    normal_env = DummyVecEnv([lambda: normal_env])  # Convertimos a un entorno vectorizado
-    # # # Se crea el entorno de vectores y se apilan los frames
-    normal_env = VecFrameStack(normal_env, 4)
+        self.cnn = nn.Sequential(
+            nn.Conv2d(n_input_channels, 32, kernel_size=8, stride=4),  # (32, 20, 20)
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=4, stride=2),                 # (64, 9, 9)
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1),                 # (64, 7, 7)
+            nn.ReLU(),
+            nn.Flatten()
+        )
 
-    return normal_env
+        with torch.no_grad():
+            sample_input = torch.as_tensor(observation_space.sample()[None]).float()
+            # sample_input = self._preprocess(sample_input)  # Preprocess the input
+            n_flatten = self.cnn(sample_input).shape[1]
 
+        self.linear = nn.Sequential(
+            nn.Linear(n_flatten , n_flatten // 2),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(n_flatten // 2, n_flatten // 4),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(n_flatten // 4, features_dim),
+            nn.ReLU()
+        )
+
+    def forward(self, observations: torch.Tensor) -> torch.Tensor:
+        x = self.cnn(observations)
+        return self.linear(x)
 
 class NormalizeInput(gym.ObservationWrapper):
     def __init__(self, env):
         super().__init__(env)
     def observation(self, observation):
         return observation.astype(np.float32) / 255.0
-
 
 class TQDMProgressCallback(BaseCallback):
     def __init__(self, total_timesteps: int, verbose=0, inital=None):
@@ -227,7 +144,7 @@ class MLflowCallback(BaseCallback):
 from collections import Counter
 
 class TestCallBack(BaseCallback):
-    def __init__(self, env, n_episodes=100, verbose=0, test_timesteps=10000, save_path=None):
+    def __init__(self, env, n_episodes=100, verbose=0, test_timesteps=10000, save_path=None, trial=None):
         super().__init__(verbose)
         self.env = env
         self.n_episodes = n_episodes
@@ -236,6 +153,7 @@ class TestCallBack(BaseCallback):
         self.test_timesteps = test_timesteps
         self.save_path = save_path
         self.best_mean_reward = -np.inf
+        self.trial = trial
     def _on_step(self) -> bool:
         if self.num_timesteps % self.test_timesteps == 0:  # Test every 1000 steps
             action_counter = Counter()
@@ -265,112 +183,95 @@ class TestCallBack(BaseCallback):
                 self.best_mean_reward = mean_reward
                 if self.save_path:
                     self.model.save(self.save_path.replace(".zip", "_best_test.zip"))
+
+            if self.trial:
+                self.trial.report(mean_reward, step=self.num_timesteps)
+                if self.trial.should_prune():
+                    raise optuna.TrialPruned()
         return True
 
-class DeepMindCNN(BaseFeaturesExtractor):
-    """
-    DeepMind-style CNN used in the original DQN paper (Mnih et al., 2015).
-    Input shape: (n_stack, 84, 84) → (4, 84, 84)
-    """
-
-    def __init__(self, observation_space, features_dim=512):
-        # features_dim is the output of the last linear layer (fc1)
-        super().__init__(observation_space, features_dim)
-
-        # Check input shape
-        n_input_channels = observation_space.shape[0]  # e.g., 4 stacked grayscale frames
-
-        self.cnn = nn.Sequential(
-            nn.Conv2d(n_input_channels, 32, kernel_size=8, stride=4),  # (32, 20, 20)
-            nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2),                 # (64, 9, 9)
-            nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=1),                 # (64, 7, 7)
-            nn.ReLU(),
-            nn.Flatten()
-        )
-
-        with torch.no_grad():
-            sample_input = torch.as_tensor(observation_space.sample()[None]).float()
-            n_flatten = self.cnn(sample_input).shape[1]
-
-        self.linear = nn.Sequential(
-            nn.Linear(n_flatten , n_flatten // 2),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(n_flatten // 2, n_flatten // 4),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(n_flatten // 4, features_dim),
-            nn.ReLU()
-        )
-
-    def forward(self, observations: torch.Tensor) -> torch.Tensor:
-        x = self.cnn(observations)
-        return self.linear(x)
-
-def train_script():
+def objective(trial: optuna.Trial):
+    gym.register_envs(ale_py)
     env_name = 'SpaceInvadersNoFrameskip-v4'
-    total_timesteps = 2_000_000
-    def make_env():
-        def _init() -> gym.Env:
+    total_timesteps = 1_000_000
+
+    frame_skips = trial.suggest_categorical("frame_skips", [4, 8, 12])
+    learning_rate = trial.suggest_loguniform("learning_rate", 1e-5, 1e-3)
+    buffer_size = trial.suggest_categorical("buffer_size", [350_000, 400_000, 450_000])
+    batch_size = trial.suggest_categorical("batch_size", [32, 64])
+    gamma = trial.suggest_float("gamma", 0.95, 0.99)
+    exploration_final_eps = trial.suggest_float("exploration_final_eps", 0.01, 0.1)
+    net_arch = trial.suggest_categorical("net_arch", ["[512, 216]", "[512]"])
+    optimizers = trial.suggest_categorical("optimizer", ["Adam", "RMSprop"])
+
+
+    def make_env(frame_skip=frame_skips):
+        def _init(frame_skip=frame_skips) -> gym.Env:
             normal_env = gym.make(env_name)
             normal_env.action_space.seed(23)
             normal_env = NormalizeInput(normal_env)
-            normal_env = AtariWrapper(normal_env)
+            normal_env = AtariWrapper(normal_env, frame_skip=frame_skips)
             normal_env = Monitor(normal_env)
             return normal_env
         return _init
 
-
-    dummy_env = DummyVecEnv([make_env()])
+    dummy_env = DummyVecEnv([make_env(frame_skip=frame_skips)])
     dummy_env.seed(23)
     normal_env_vec = VecFrameStack(dummy_env, n_stack=4)
 
     obs = normal_env_vec.reset()
     print(obs.shape)
-
     policy_kwargs = dict(
         features_extractor_class=DeepMindCNN,
         features_extractor_kwargs=dict(features_dim=512),
-        net_arch=[512, 512]
+        net_arch=[512] if net_arch == "[512]" else [512, 216],
+        optimizer_class=torch.optim.Adam if optimizers == "Adam" else torch.optim.RMSprop
     )
 
-
     progress_bar_callback = TQDMProgressCallback(total_timesteps=total_timesteps)
+
     ml_callback = MLflowCallback(
-        best_model_path="models/custom_DeepMind_sb_zoo_copy.zip",
+        best_model_path=f"models/optuna_opti/custom_DeepMind_{trial.number}.zip",
         experiment_name="DQN_SpaceInvaders",
         run_name="DQN_Run",
         log_freq=25_000)
-    test_callback = TestCallBack(normal_env_vec, test_timesteps=50_000, save_path="models/custom_DeepMind_sb_zoo_copy.zip")
+    test_callback = TestCallBack(normal_env_vec, test_timesteps=50_000,
+                                 save_path=f"models/optuna_opti/custom_DeepMind_{trial.number}.zip", trial=trial)
 
-    experiment_name = "DQN_SpaceInvaders"
+    experiment_name = "DQN_SpaceInvaders_Optuna"
     exist_experiment = mlflow.get_experiment_by_name(experiment_name)
     if not exist_experiment:
         mlflow.create_experiment(experiment_name)
     mlflow.set_experiment(experiment_name)
-    with mlflow.start_run(run_name="DQN_Run_custom_DeepMind_sb_zoo_copy"):
-        mlflow.log_param("env_name", env_name)
-        mlflow.log_param("total_timesteps", total_timesteps)
-        mlflow.log_param("learning_rate", 0.0001)
-        mlflow.log_param("buffer_size", 10_000)
-        mlflow.log_param("gradient_steps", 1)
-        mlflow.log_param("exploration_fraction", 0.05)
-        mlflow.log_param("exploration_final_eps", 0.01)
-        mlflow.log_param("exploration_initial_eps", 1.0)
-        mlflow.log_param("batch_size", 32)
-        mlflow.log_param("gamma", 0.99)
-        mlflow.log_param("learning_starts", 100_000)
-        mlflow.log_param("target_update_interval", 1_000)
-        mlflow.log_param("file_name", "custom_DeepMind_v2_8_RMS_continue_V2.zip")
+    with mlflow.start_run(run_name=f"DQN_Run_custom_DeepMind_Optuna_{trial.number}"):
+        mlflow.log_params({
+            "frame_skips": frame_skips,
+            "learning_rate": learning_rate,
+            "buffer_size": buffer_size,
+            "batch_size": batch_size,
+            "gamma": gamma,
+            "exploration_final_eps": exploration_final_eps,
+            "net_arch": net_arch,
+            "total_timesteps": total_timesteps
+        })
 
-        model = DQN("CnnPolicy", normal_env_vec, batch_size=32, learning_rate=0.0001, buffer_size=10_000,
-                    gradient_steps=1, exploration_fraction=0.05, exploration_final_eps=0.01, learning_starts=100_000,
-                    policy_kwargs=policy_kwargs)
+        model = DQN("CnnPolicy", normal_env_vec, policy_kwargs=policy_kwargs, learning_rate=learning_rate,
+                    buffer_size=buffer_size, batch_size=batch_size, gamma=gamma, exploration_fraction=0.01,
+                    exploration_final_eps=exploration_final_eps, learning_starts=10_000, target_update_interval=10_000)
 
         t_model = model.learn(total_timesteps=total_timesteps, callback=[progress_bar_callback, ml_callback, test_callback], log_interval=2_000, reset_num_timesteps=False)
 
 
 if __name__ == "__main__":
-    train_script()
+    os.makedirs("optuna_storage", exist_ok=True)
+
+    pruner = optuna.pruners.MedianPruner()
+    study = optuna.create_study(
+        study_name="dqn_optimization",
+        direction="maximize",
+        storage="sqlite:///optuna_storage/dqn_spaceinvaders.db",
+        load_if_exists=True,
+        pruner=pruner
+    )
+
+    study.optimize(objective, n_trials=20, n_jobs=1)

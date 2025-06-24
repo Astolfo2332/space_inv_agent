@@ -199,3 +199,4 @@ cython_debug/
 mlruns
 models
 data
+optuna_storage
