@@ -26,7 +26,7 @@ from stable_baselines3.common.atari_wrappers import AtariWrapper
 from collections import defaultdict
 
 
-def make_env():
+def make_env_original():
     gym.register_envs(ale_py)
     class CustomPenaltyWrapper(gym.Wrapper):
         def __init__(self, env):
@@ -146,6 +146,29 @@ class NormalizeInput(gym.ObservationWrapper):
     def observation(self, observation):
         return observation.astype(np.float32) / 255.0
 
+class CustomPenaltyWrapper(gym.Wrapper):
+    def __init__(self, env):
+        super().__init__(env)
+        self.action_counter = defaultdict(int)
+
+    def reset(self, **kwargs):
+        obs, info = self.env.reset(**kwargs)
+        self.action_counter.clear()  # Reset action counter
+        return obs, info
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+
+        # Update action counter
+        self.action_counter[action] += 1
+
+        # Calculate entropy-based penalty
+        total_actions = sum(self.action_counter.values())
+        action_percentage = self.action_counter[action] / total_actions
+        if action_percentage >= 0.5 and total_actions > 10:
+            reward -= 0.025
+
+        return obs, reward, terminated, truncated, info
 
 class TQDMProgressCallback(BaseCallback):
     def __init__(self, total_timesteps: int, verbose=0, inital=None):
@@ -163,9 +186,9 @@ class TQDMProgressCallback(BaseCallback):
     def _on_step(self):
         self.progress_bar.update(1)
         # Optional: log latest reward if available
-        infos = self.locals.get("infos", [])
-        if infos and isinstance(infos[0], dict) and "episode" in infos[0]:
-            self.progress_bar.set_postfix(reward=infos[0]["episode"]["r"])
+        rewards = [ep_info['r'] for ep_info in self.model.ep_info_buffer] if self.model.ep_info_buffer else []
+        if rewards:
+            self.progress_bar.set_postfix(reward=np.mean(rewards), std=np.std(rewards))
         return True  # Return True to continue training
 
     def _on_training_end(self):
@@ -238,6 +261,7 @@ class TestCallBack(BaseCallback):
         self.best_mean_reward = -np.inf
     def _on_step(self) -> bool:
         if self.num_timesteps % self.test_timesteps == 0:  # Test every 1000 steps
+            self.rewards = []
             action_counter = Counter()
             for _ in range(self.n_episodes):
                 ep_reward = 0
@@ -294,6 +318,7 @@ class DeepMindCNN(BaseFeaturesExtractor):
             sample_input = torch.as_tensor(observation_space.sample()[None]).float()
             n_flatten = self.cnn(sample_input).shape[1]
 
+        # Modification
         self.linear = nn.Sequential(
             nn.Linear(n_flatten , n_flatten // 2),
             nn.ReLU(),
@@ -304,6 +329,10 @@ class DeepMindCNN(BaseFeaturesExtractor):
             nn.Linear(n_flatten // 4, features_dim),
             nn.ReLU()
         )
+        # Original
+        self.linear = nn.Sequential(
+            nn.Linear(n_flatten, 512),
+        )
 
     def forward(self, observations: torch.Tensor) -> torch.Tensor:
         x = self.cnn(observations)
@@ -311,21 +340,35 @@ class DeepMindCNN(BaseFeaturesExtractor):
 
 def train_script():
     env_name = 'SpaceInvadersNoFrameskip-v4'
-    total_timesteps = 2_000_000
+    total_timesteps = 10_000_000
     def make_env():
         def _init() -> gym.Env:
             normal_env = gym.make(env_name)
             normal_env.action_space.seed(23)
             normal_env = NormalizeInput(normal_env)
-            normal_env = AtariWrapper(normal_env)
+            normal_env = CustomPenaltyWrapper(normal_env)
+            normal_env = AtariWrapper(normal_env, frame_skip=4)
             normal_env = Monitor(normal_env)
             return normal_env
         return _init
 
+    def make_env_no_pen():
+        def _init() -> gym.Env:
+            normal_env = gym.make(env_name)
+            normal_env.action_space.seed(23)
+            normal_env = NormalizeInput(normal_env)
+            normal_env = AtariWrapper(normal_env, frame_skip=4)
+            normal_env = Monitor(normal_env)
+            return normal_env
+        return _init
 
     dummy_env = DummyVecEnv([make_env()])
     dummy_env.seed(23)
     normal_env_vec = VecFrameStack(dummy_env, n_stack=4)
+
+    dummy_env = DummyVecEnv([make_env_no_pen()])
+    dummy_env.seed(23)
+    normal_env_vec_no_pen = VecFrameStack(dummy_env, n_stack=4)
 
     obs = normal_env_vec.reset()
     print(obs.shape)
@@ -333,43 +376,68 @@ def train_script():
     policy_kwargs = dict(
         features_extractor_class=DeepMindCNN,
         features_extractor_kwargs=dict(features_dim=512),
-        net_arch=[512, 512]
+        net_arch=[512, 216],
+        optimizer_class=torch.optim.RMSprop,
+        optimizer_kwargs=dict(eps=1e-6, alpha=0.99, momentum=0),
     )
 
+    # env = make_env_original()
+
+    # model = DQN.load("models/custom_DeepMind_v2_8_RMS_lastest.zip", env=env)
+
+    params = {
+        "env_name": env_name,
+        "total_timesteps": total_timesteps,
+        "learning_rate": 1e-6,
+        "buffer_size": 1_000_000,
+        "gamma": 0.99,
+        "file_name": "models/custom_DeepMind_v2_4_RMS_hsuanchuu_pen.zip",
+        "exp_name": "custom_DeepMind_v2_4_RMS_hsuanchuu_pen",
+        "exploration_fraction": 0.1,
+        "exploration_initial_eps": 1.0,
+        "exploration_final_eps": 0.01,
+        "batch_size": 32,
+        "learning_starts": 100_000,
+        "target_update_interval": 5_000,
+        "optimizer_class": "RMSprop",
+        "penalized_repeat": 0.025
+    }
 
     progress_bar_callback = TQDMProgressCallback(total_timesteps=total_timesteps)
     ml_callback = MLflowCallback(
-        best_model_path="models/custom_DeepMind_sb_zoo_copy.zip",
+        best_model_path=params["file_name"],
         experiment_name="DQN_SpaceInvaders",
         run_name="DQN_Run",
-        log_freq=25_000)
-    test_callback = TestCallBack(normal_env_vec, test_timesteps=50_000, save_path="models/custom_DeepMind_sb_zoo_copy.zip")
+        log_freq=50_000)
+    test_callback = TestCallBack(normal_env_vec_no_pen, test_timesteps=100_000, save_path=params["file_name"])
 
     experiment_name = "DQN_SpaceInvaders"
     exist_experiment = mlflow.get_experiment_by_name(experiment_name)
     if not exist_experiment:
         mlflow.create_experiment(experiment_name)
     mlflow.set_experiment(experiment_name)
-    with mlflow.start_run(run_name="DQN_Run_custom_DeepMind_sb_zoo_copy"):
-        mlflow.log_param("env_name", env_name)
-        mlflow.log_param("total_timesteps", total_timesteps)
-        mlflow.log_param("learning_rate", 0.0001)
-        mlflow.log_param("buffer_size", 10_000)
-        mlflow.log_param("gradient_steps", 1)
-        mlflow.log_param("exploration_fraction", 0.05)
-        mlflow.log_param("exploration_final_eps", 0.01)
-        mlflow.log_param("exploration_initial_eps", 1.0)
-        mlflow.log_param("batch_size", 32)
-        mlflow.log_param("gamma", 0.99)
-        mlflow.log_param("learning_starts", 100_000)
-        mlflow.log_param("target_update_interval", 1_000)
-        mlflow.log_param("file_name", "custom_DeepMind_v2_8_RMS_continue_V2.zip")
-
-        model = DQN("CnnPolicy", normal_env_vec, batch_size=32, learning_rate=0.0001, buffer_size=10_000,
-                    gradient_steps=1, exploration_fraction=0.05, exploration_final_eps=0.01, learning_starts=100_000,
-                    policy_kwargs=policy_kwargs)
+    with mlflow.start_run(run_name=f"DQN_Run_{params['exp_name']}"):
+        mlflow.log_params(params)
+        model = DQN(
+            "CnnPolicy",
+            normal_env_vec,
+            learning_rate=params["learning_rate"],
+            buffer_size=params["buffer_size"],
+            learning_starts=params["learning_starts"],
+            batch_size=params["batch_size"],
+            gamma=params["gamma"],
+            target_update_interval=params["target_update_interval"],
+            exploration_fraction=params["exploration_fraction"],
+            exploration_initial_eps=params["exploration_initial_eps"],
+            exploration_final_eps=params["exploration_final_eps"],
+            policy_kwargs=policy_kwargs,
+            seed=23,
+        )
 
         t_model = model.learn(total_timesteps=total_timesteps, callback=[progress_bar_callback, ml_callback, test_callback], log_interval=2_000, reset_num_timesteps=False)
+
+        del model
+        del t_model
 
 
 if __name__ == "__main__":

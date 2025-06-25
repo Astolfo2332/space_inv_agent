@@ -154,8 +154,11 @@ class TestCallBack(BaseCallback):
         self.save_path = save_path
         self.best_mean_reward = -np.inf
         self.trial = trial
+        self.acumulative_rewards = []
+
     def _on_step(self) -> bool:
         if self.num_timesteps % self.test_timesteps == 0:  # Test every 1000 steps
+            self.rewards = []
             action_counter = Counter()
             for _ in range(self.n_episodes):
                 ep_reward = 0
@@ -175,6 +178,7 @@ class TestCallBack(BaseCallback):
             mlflow.log_metric("test_reward_std", std_reward, step=self.num_timesteps)
             mlflow.log_metric("test_reward_max", np.max(self.rewards), step=self.num_timesteps)
             mlflow.log_metric("test_reward_min", np.min(self.rewards), step=self.num_timesteps)
+            self.acumulative_rewards.append(mean_reward)
             total_actions = sum(action_counter.values())
             for action, count in action_counter.items():
                 mlflow.log_metric(f"action_{action}_count", count, step=self.num_timesteps)
@@ -193,12 +197,12 @@ class TestCallBack(BaseCallback):
 def objective(trial: optuna.Trial):
     gym.register_envs(ale_py)
     env_name = 'SpaceInvadersNoFrameskip-v4'
-    total_timesteps = 1_000_000
+    total_timesteps = 20_000
 
     frame_skips = trial.suggest_categorical("frame_skips", [4, 8, 12])
-    learning_rate = trial.suggest_loguniform("learning_rate", 1e-5, 1e-3)
-    buffer_size = trial.suggest_categorical("buffer_size", [350_000, 400_000, 450_000])
-    batch_size = trial.suggest_categorical("batch_size", [32, 64])
+    learning_rate = trial.suggest_float("learning_rate", 1e-5, 1e-3)
+    buffer_size = trial.suggest_categorical("buffer_size", [350_000, 450_000, 1_000_000])
+    batch_size = trial.suggest_categorical("batch_size", [32])
     gamma = trial.suggest_float("gamma", 0.95, 0.99)
     exploration_final_eps = trial.suggest_float("exploration_final_eps", 0.01, 0.1)
     net_arch = trial.suggest_categorical("net_arch", ["[512, 216]", "[512]"])
@@ -235,7 +239,7 @@ def objective(trial: optuna.Trial):
         experiment_name="DQN_SpaceInvaders",
         run_name="DQN_Run",
         log_freq=25_000)
-    test_callback = TestCallBack(normal_env_vec, test_timesteps=50_000,
+    test_callback = TestCallBack(normal_env_vec, test_timesteps=10_000,
                                  save_path=f"models/optuna_opti/custom_DeepMind_{trial.number}.zip", trial=trial)
 
     experiment_name = "DQN_SpaceInvaders_Optuna"
@@ -252,7 +256,8 @@ def objective(trial: optuna.Trial):
             "gamma": gamma,
             "exploration_final_eps": exploration_final_eps,
             "net_arch": net_arch,
-            "total_timesteps": total_timesteps
+            "total_timesteps": total_timesteps,
+            "optimizer": optimizers
         })
 
         model = DQN("CnnPolicy", normal_env_vec, policy_kwargs=policy_kwargs, learning_rate=learning_rate,
@@ -261,9 +266,22 @@ def objective(trial: optuna.Trial):
 
         t_model = model.learn(total_timesteps=total_timesteps, callback=[progress_bar_callback, ml_callback, test_callback], log_interval=2_000, reset_num_timesteps=False)
 
+        del model
+        del t_model
+
+        top_10 = sorted(test_callback.acumulative_rewards, reverse=True)[:10]
+        top_10_mean = np.mean(top_10)
+        top_10_std = np.std(top_10)
+        
+        return top_10_mean - top_10_std
+
 
 if __name__ == "__main__":
+    from optuna.trial import TrialState
+    from optuna.storages import JournalStorage, JournalFileStorage
+
     os.makedirs("optuna_storage", exist_ok=True)
+
 
     pruner = optuna.pruners.MedianPruner()
     study = optuna.create_study(
@@ -273,5 +291,17 @@ if __name__ == "__main__":
         load_if_exists=True,
         pruner=pruner
     )
+    # finished_trials = [t for t in study.trials if t.state in (TrialState.COMPLETE, TrialState.PRUNED)]
+    # failed_trials = [t for t in study.trials if t.state in (TrialState.FAIL, TrialState.RUNNING)]
+    # running_trials = [t for t in study.trials if t.state == TrialState.RUNNING]
+    #
+    #
+    # for trial in running_trials:
+    #     study._storage.set_trial_state_values(trial._trial_id, TrialState.FAIL)
+    #
+    # for trial in failed_trials:
+    #     study.enqueue_trial(trial.params)
 
-    study.optimize(objective, n_trials=20, n_jobs=1)
+    n_trials_target = 20
+    # n_trials_remaining = n_trials_target - len(finished_trials)
+    study.optimize(objective, n_trials=n_trials_target, n_jobs=1)
