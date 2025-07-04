@@ -595,11 +595,11 @@ def train_script_a2c():
 
 def train_ppo():
     env_name = 'SpaceInvadersNoFrameskip-v4'
-    total_timesteps = 10_000_000
+    total_timesteps = 12_000_000
 
     params = {
-        "exp_name": "deepmind_zoo_imp_ppo",
-        "file_name": "models/deepmind_zoo_imp_ppo.zip",
+        "exp_name": "deepmind_zoo_imp_ppo_continue_v2",
+        "file_name": "models/deepmind_zoo_imp_ppo_continue_v2.zip",
         "env_name": env_name,
         "total_timesteps": total_timesteps,
         "vf_coef": 0.5,
@@ -658,8 +658,10 @@ def train_ppo():
     obs = test_env_vec.reset()
     print("test_env", obs.shape)
 
+    model = PPO.load("models/deepmind_zoo_imp_ppo_continue.zip", env=test_env_vec)
 
-    progress_bar_callback = TQDMProgressCallback(total_timesteps=total_timesteps)
+
+    progress_bar_callback = TQDMProgressCallback(total_timesteps=total_timesteps // params["env_var"])
     ml_callback = MLflowCallback(
         best_model_path=params["file_name"],
         experiment_name="A2C_SpaceInvaders",
@@ -675,19 +677,19 @@ def train_ppo():
     with mlflow.start_run(run_name=f"PPO_Run_{params['exp_name']}"):
         mlflow.log_params(params)
 
-        model = PPO(
-            "CnnPolicy",
-            test_env_vec,
-            clip_range=params["clip_range"],
-            n_steps=params["n_steps"],
-            batch_size=params["batch_size"],
-            n_epochs=params["n_epochs"],
-            ent_coef=params["ent_coef"],
-            vf_coef=params["vf_coef"],
-            learning_rate=params["learning_rate"],
-            seed=23,
-            verbose=1,
-        )
+        # model = PPO(
+        #     "CnnPolicy",
+        #     test_env_vec,
+        #     clip_range=params["clip_range"],
+        #     n_steps=params["n_steps"],
+        #     batch_size=params["batch_size"],
+        #     n_epochs=params["n_epochs"],
+        #     ent_coef=params["ent_coef"],
+        #     vf_coef=params["vf_coef"],
+        #     learning_rate=params["learning_rate"],
+        #     seed=23,
+        #     verbose=1,
+        # )
 
         t_model = model.learn(total_timesteps=total_timesteps,
                               callback=[progress_bar_callback, ml_callback, test_callback], log_interval=2_000)
@@ -826,7 +828,7 @@ def test_env():
     dummy_env_pen = VecFrameStack(dummy_env_pen, n_stack=params["n_stack"])
     dummy_env_pen = VecTransposeImage(dummy_env_pen)
 
-    model = A2C.load("models/deepmind_zoo_imp_a2c.zip", env=dummy_env_pen)
+    model = A2C.load("models/deepmind_zoo_imp_a2c_continue_v2.zip", env=dummy_env_pen)
 
     total_rewards = []
     total_actions = {}
@@ -853,7 +855,7 @@ def save_a_video():
     env_name = 'SpaceInvadersNoFrameskip-v4'
     params = {
         "frame_skip": 4,
-        "n_stack": 1,
+        "n_stack": 4,
     }
     def make_env_no_pen():
         def _init() -> gym.Env:
@@ -869,7 +871,7 @@ def save_a_video():
     dummy_env_pen = VecFrameStack(dummy_env_pen, n_stack=params["n_stack"])
     dummy_env_pen = VecTransposeImage(dummy_env_pen)
 
-    model = A2C.load("models/deepmind_zoo_imp_a2c_continue_v2_best_test.zip", env=dummy_env_pen)
+    model = PPO.load("models/deepmind_zoo_imp_ppo_continue_v2.zip", env=dummy_env_pen)
 
     video_path = "videos"
     eval_env = VecVideoRecorder(
@@ -877,7 +879,7 @@ def save_a_video():
         video_folder=video_path,
         record_video_trigger=lambda step: step == 0,
         video_length=10000,
-        name_prefix="test"
+        name_prefix="test-ppo_30M"
     )
 
     obs = eval_env.reset()
@@ -890,6 +892,8 @@ def save_a_video():
         if "lives" in info[0]:
             if info[0]["lives"] < lives:
                 lives = info[0]["lives"]
+                if done:
+                    lives = 3
                 done = True
                 if lives == 0:
                     lives = 3

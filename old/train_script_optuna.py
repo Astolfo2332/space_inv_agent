@@ -1,18 +1,27 @@
 import optuna
+
 import numpy as np
-from stable_baselines3 import DQN
+from stable_baselines3 import DQN, A2C, PPO
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 import torch.nn as nn
 import torch
 import os
-from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack
+from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack, VecNormalize, VecEnvWrapper, VecMonitor, \
+    VecTransposeImage, SubprocVecEnv, VecVideoRecorder
+from stable_baselines3.common.env_util import make_vec_env
+from stable_baselines3.common.vec_env.vec_transpose import VecTransposeImage
 from stable_baselines3.common.callbacks import ProgressBarCallback, BaseCallback
 from stable_baselines3.common.monitor import Monitor
+
 import gymnasium as gym
+import ale_py
+
 from tqdm.auto import tqdm
 import mlflow
+
 from stable_baselines3.common.atari_wrappers import AtariWrapper
-import ale_py
+
+from stable_baselines3.common.sb2_compat.rmsprop_tf_like import RMSpropTFLike
 
 
 class DeepMindCNN(BaseFeaturesExtractor):
@@ -80,9 +89,9 @@ class TQDMProgressCallback(BaseCallback):
     def _on_step(self):
         self.progress_bar.update(1)
         # Optional: log latest reward if available
-        infos = self.locals.get("infos", [])
-        if infos and isinstance(infos[0], dict) and "episode" in infos[0]:
-            self.progress_bar.set_postfix(reward=infos[0]["episode"]["r"])
+        rewards = [ep_info['r'] for ep_info in self.model.ep_info_buffer] if self.model.ep_info_buffer else []
+        if rewards:
+            self.progress_bar.set_postfix(reward=np.mean(rewards), std=np.std(rewards))
         return True  # Return True to continue training
 
     def _on_training_end(self):
@@ -104,16 +113,19 @@ class MLflowCallback(BaseCallback):
             rewards = [ep_info['r'] for ep_info in self.model.ep_info_buffer] if self.model.ep_info_buffer else []
             lengths = [ep_info['l'] for ep_info in self.model.ep_info_buffer] if self.model.ep_info_buffer else []
 
+            step = self.num_timesteps
             mean_reward = np.mean(rewards) if rewards else 0.0
             max_reward = np.max(rewards) if rewards else 0.0
             min_reward = np.min(rewards) if rewards else 0.0
             mean_length = np.mean(lengths) if lengths else 0.0
             std_reward = np.std(rewards) if rewards else 0.0
-            exploration_mean = self.model.exploration_rate
+            if hasattr(self.model, "exploration_rate"):
+                exploration_mean = self.model.exploration_rate
+                mlflow.log_metric("exploration_rate", exploration_mean, step=step)
+
             loss_mean = self.logger.name_to_value.get("train/loss", 0)
             training_updates = self.logger.name_to_value.get("train/n_updates", 0)
 
-            step = self.num_timesteps
             mlflow.log_metric("timesteps", step, step=step)
             mlflow.log_metric("episode_reward_mean", mean_reward, step=step)
             mlflow.log_metric("episode_reward_max", max_reward, step=step)
@@ -121,7 +133,6 @@ class MLflowCallback(BaseCallback):
             mlflow.log_metric("episode_length_mean", mean_length, step=step)
             mlflow.log_metric("episode_reward_std", std_reward, step=step)
             mlflow.log_metric("episode_length_std", std_reward, step=step)
-            mlflow.log_metric("exploration_rate", exploration_mean, step=step)
             if loss_mean != 0:
                 mlflow.log_metric("loss_mean", loss_mean, step=step)
             if training_updates != 0:
@@ -275,6 +286,123 @@ def objective(trial: optuna.Trial):
         
         return top_10_mean - top_10_std
 
+def objective_a2c(trial: optuna.Trial):
+    gym.register_envs(ale_py)
+    env_name = 'SpaceInvadersNoFrameskip-v4'
+    total_timesteps = 10_000_000
+
+
+    ent_coef = trial.suggest_float("ent_coef", 0.001, 0.1, log=True)
+    vf_coef = trial.suggest_float("vf_coef", 0.01, 0.5, log=True)
+    lr_rate = trial.suggest_float("learning_rate", 1e-4, 1e-3, log=True)
+    eps = trial.suggest_float("eps", 1e-6, 1e-4, log=True)
+
+    params = {
+        "learning_rate": lr_rate,
+        "eps": eps,
+        "exp_name": f"deepmind_zoo_imp_a2c_optuna_{trial.number}",
+        "file_name": f"models/optuna_opti/a2c/deepmind_zoo_imp_a2c_optuna_{trial.number}.zip",
+        "env_name": env_name,
+        "total_timesteps": total_timesteps,
+        "ent_coef": ent_coef,
+        "vf_coef": vf_coef,
+        "normalize": False,
+        "env_var": 32,
+        "n_stack": 1,
+        "frame_skip": 4
+    }
+
+    def make_env():
+        def _init() -> gym.Env:
+            normal_env = gym.make(env_name)
+            normal_env.action_space.seed(23)
+            # normal_env = NormalizeInput(normal_env)
+            # normal_env = CustomPenaltyWrapper(normal_env, params["penalized_repeat"])
+            normal_env = AtariWrapper(normal_env, frame_skip=params["frame_skip"])
+            normal_env = Monitor(normal_env)
+            return normal_env
+        return _init
+
+    def make_env_no_pen():
+        def _init() -> gym.Env:
+            normal_env = gym.make(env_name)
+            normal_env.action_space.seed(23)
+            # normal_env = NormalizeInput(normal_env)
+            normal_env = AtariWrapper(normal_env, frame_skip=params["frame_skip"])
+            return normal_env
+        return _init
+
+
+    base_env = gym.make(env_name)
+    base_env.action_space.seed(23)
+    normalize_env = NormalizeInput(base_env)
+    # pen_env = CustomPenaltyWrapper(normalize_env, params["penalized_repeat"])
+    pen_env = AtariWrapper(base_env, frame_skip=params["frame_skip"])
+    pen_env = Monitor(pen_env)
+
+    dummy_env_pen = DummyVecEnv([make_env_no_pen()])
+    dummy_env_pen.seed(23)
+    dummy_env_pen = VecFrameStack(dummy_env_pen, n_stack=params["n_stack"])
+    dummy_env_pen = VecTransposeImage(dummy_env_pen)
+
+    dummy_env = make_vec_env(make_env(), n_envs=params["env_var"], vec_env_cls=SubprocVecEnv)
+    dummy_env.seed(23)
+    test_env_vec_stack = VecFrameStack(dummy_env, n_stack=params["n_stack"])
+    test_env_vec = VecTransposeImage(test_env_vec_stack)
+
+    obs = dummy_env_pen.reset()
+    print("test_env", obs.shape)
+
+    obs = test_env_vec.reset()
+    print("train_env", obs.shape)
+    # env = make_env_original()
+
+    a2c_kwargs = {
+        "optimizer_class": RMSpropTFLike,
+        "optimizer_kwargs": {
+            "eps": eps,
+        }
+    }
+
+
+    progress_bar_callback = TQDMProgressCallback(total_timesteps=total_timesteps // params["env_var"])
+    ml_callback = MLflowCallback(
+        best_model_path=params["file_name"],
+        experiment_name="A2C_SpaceInvaders",
+        run_name="DQN_Run",
+        log_freq=50_000)
+    test_callback = TestCallBack(dummy_env_pen, test_timesteps=500_000, save_path=params["file_name"], trial=trial)
+
+    experiment_name = "A2C_SpaceInvaders_optuna"
+    exist_experiment = mlflow.get_experiment_by_name(experiment_name)
+    if not exist_experiment:
+        mlflow.create_experiment(experiment_name)
+    mlflow.set_experiment(experiment_name)
+    with mlflow.start_run(run_name=f"A2C_Run_{params['exp_name']}"):
+        mlflow.log_params(params)
+
+        model = A2C(
+            "CnnPolicy",
+            test_env_vec,
+            learning_rate=lr_rate,
+            ent_coef=ent_coef,
+            vf_coef=vf_coef,
+            policy_kwargs=a2c_kwargs,
+            seed=23,
+            verbose=1,
+        )
+
+        t_model = model.learn(total_timesteps=total_timesteps,
+                              callback=[progress_bar_callback, ml_callback, test_callback], log_interval=2_000)
+
+        del model
+        del t_model
+        top_10 = sorted(test_callback.acumulative_rewards, reverse=True)[:10]
+        top_10_mean = np.mean(top_10)
+        top_10_std = np.std(top_10)
+
+        return top_10_mean - top_10_std
+
 
 if __name__ == "__main__":
     from optuna.trial import TrialState
@@ -285,9 +413,9 @@ if __name__ == "__main__":
 
     pruner = optuna.pruners.MedianPruner()
     study = optuna.create_study(
-        study_name="dqn_optimization",
+        study_name="a2c_optimization",
         direction="maximize",
-        storage="sqlite:///optuna_storage/dqn_spaceinvaders.db",
+        storage="sqlite:///optuna_storage/a2c_spaceinvaders.db",
         load_if_exists=True,
         pruner=pruner
     )
@@ -304,4 +432,4 @@ if __name__ == "__main__":
 
     n_trials_target = 20
     # n_trials_remaining = n_trials_target - len(finished_trials)
-    study.optimize(objective, n_trials=n_trials_target, n_jobs=1)
+    study.optimize(objective_a2c, n_trials=n_trials_target, n_jobs=3)

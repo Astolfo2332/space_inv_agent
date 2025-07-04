@@ -201,3 +201,4 @@ models
 data
 optuna_storage
 videos
+*.zip
