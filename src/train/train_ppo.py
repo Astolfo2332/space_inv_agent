@@ -9,6 +9,7 @@ from stable_baselines3.common.env_util import make_vec_env
 
 from src.train.utils.callbacks import TQDMProgressCallback, MLflowCallback, TestCallBack
 from stable_baselines3.common.utils import get_linear_fn
+import ale_py
 
 def train_ppo():
     env_name = 'SpaceInvadersNoFrameskip-v4'

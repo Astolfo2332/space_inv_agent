@@ -9,6 +9,7 @@ from stable_baselines3.common.env_util import make_vec_env
 
 from src.train.utils.callbacks import TQDMProgressCallback, MLflowCallback, TestCallBack
 from src.train.utils.models import DeepMindCNN
+import ale_py
 
 def train_script_dqn():
     env_name = 'SpaceInvadersNoFrameskip-v4'
@@ -18,16 +19,16 @@ def train_script_dqn():
         "env_name": env_name,
         "total_timesteps": total_timesteps,
         "learning_rate": 1e-4,
-        "buffer_size": 10_000,
+        "buffer_size": 1_000_000,
         "gamma": 0.99,
-        "file_name": "models/custom_DeepMind_v3_4.zip",
-        "exp_name": "custom_DeepMind_v3_4",
+        "file_name": "models/custom_DeepMind_v4_4.zip",
+        "exp_name": "custom_DeepMind_v4_4",
         "exploration_fraction": 0.1,
         "exploration_initial_eps": 1.0,
         "exploration_final_eps": 0.01,
         "batch_size": 32,
         "learning_starts": 100_000,
-        "target_update_interval": 1_000,
+        "target_update_interval": 10_000,
         "optimizer_class": "Adam",
         "penalized_repeat": 0.25,
         "n_stack": 4,

@@ -5,4 +5,4 @@ from src.train.train_qrdqn import train_script_qrdqn
 
 if __name__ == "__main__":
     # Aquí se cambia para entrenar el modelo que se quiera
-    train_ppo()
+    train_script_dqn()

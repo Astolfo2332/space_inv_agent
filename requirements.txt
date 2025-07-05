@@ -1,0 +1,16 @@
+ale_py==0.11.1
+gymnasium==1.1.1
+mlflow==3.1.0
+mlflow_skinny==3.1.0
+numpy==2.3.1
+Pillow==11.3.0
+pygame==2.6.1
+PyVirtualDisplay==3.0
+sb3_contrib==2.6.0
+stable_baselines3==2.6.0
+sympy==1.13.3
+torch==2.7.1+rocm6.3
+torchvision==0.22.1+rocm6.3
+tqdm==4.66.5
+optuna
+pandas

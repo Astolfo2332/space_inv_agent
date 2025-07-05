@@ -9,6 +9,7 @@ from stable_baselines3.common.env_util import make_vec_env
 
 from src.train.utils.callbacks import TQDMProgressCallback, MLflowCallback, TestCallBack
 from src.train.utils.models import DeepMindCNN
+import ale_py
 
 def train_script_qrdqn():
     env_name = 'SpaceInvadersNoFrameskip-v4'

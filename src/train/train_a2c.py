@@ -9,6 +9,7 @@ from stable_baselines3.common.env_util import make_vec_env
 
 from src.train.utils.callbacks import TQDMProgressCallback, MLflowCallback, TestCallBack
 from stable_baselines3.common.sb2_compat.rmsprop_tf_like import RMSpropTFLike
+import ale_py
 
 def train_script_a2c():
     env_name = 'SpaceInvadersNoFrameskip-v4'
