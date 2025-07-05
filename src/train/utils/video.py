@@ -4,6 +4,7 @@ from stable_baselines3.common.atari_wrappers import AtariWrapper
 
 from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack, VecTransposeImage, VecVideoRecorder
 from stable_baselines3 import DQN, A2C, PPO
+from sb3_contrib import QRDQN
 
 def save_a_video():
     env_name = 'SpaceInvadersNoFrameskip-v4'
@@ -25,7 +26,7 @@ def save_a_video():
     dummy_env_pen = VecFrameStack(dummy_env_pen, n_stack=params["n_stack"])
     dummy_env_pen = VecTransposeImage(dummy_env_pen)
 
-    model = PPO.load("models/deepmind_zoo_imp_ppo_continue_v2.zip", env=dummy_env_pen)
+    model = QRDQN.load("best_models/custom_DeepMind_v3_4_qrdqn_best_test.zip", env=dummy_env_pen)
 
     video_path = "videos"
     eval_env = VecVideoRecorder(
@@ -33,7 +34,7 @@ def save_a_video():
         video_folder=video_path,
         record_video_trigger=lambda step: step == 0,
         video_length=10000,
-        name_prefix="test-ppo_30M"
+        name_prefix="test-qrdqn"
     )
 
     obs = eval_env.reset()

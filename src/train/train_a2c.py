@@ -13,19 +13,19 @@ import ale_py
 
 def train_script_a2c():
     env_name = 'SpaceInvadersNoFrameskip-v4'
-    total_timesteps = 20_000_000
+    total_timesteps = 30_000_000
 
     params = {
         "learning_rate": 1e-3,
-        "exp_name": "deepmind_zoo_imp_a2c_continue_v2",
-        "file_name": "models/deepmind_zoo_imp_a2c_continue_v2.zip",
+        "exp_name": "deepmind_zoo_imp_a2c_16_4",
+        "file_name": "models/deepmind_zoo_imp_a2c_16_4.zip",
         "env_name": env_name,
         "total_timesteps": total_timesteps,
         "ent_coef": 0.01,
         "vf_coef": 0.25,
         "normalize": False,
         "env_var": 32,
-        "n_stack": 1,
+        "n_stack": 4,
         "frame_skip": 4
     }
 
@@ -70,7 +70,7 @@ def train_script_a2c():
     print("train_env", obs.shape)
     # env = make_env_original()
 
-    model = A2C.load("models/deepmind_zoo_imp_a2c_continue.zip", env=test_env_vec)
+    # model = A2C.load("models/deepmind_zoo_imp_a2c_continue.zip", env=test_env_vec)
 
     a2c_kwargs = {
         "optimizer_class": RMSpropTFLike,
@@ -96,16 +96,16 @@ def train_script_a2c():
     with mlflow.start_run(run_name=f"A2C_Run_{params['exp_name']}"):
         mlflow.log_params(params)
 
-        # model = A2C(
-        #     "CnnPolicy",
-        #     test_env_vec,
-        #     # learning_rate=params["learning_rate"],
-        #     ent_coef=params["ent_coef"],
-        #     vf_coef=params["vf_coef"],
-        #     policy_kwargs=a2c_kwargs,
-        #     seed=23,
-        #     verbose=1,
-        # )
+        model = A2C(
+            "CnnPolicy",
+            test_env_vec,
+            # learning_rate=params["learning_rate"],
+            ent_coef=params["ent_coef"],
+            vf_coef=params["vf_coef"],
+            policy_kwargs=a2c_kwargs,
+            seed=23,
+            verbose=1,
+        )
 
         t_model = model.learn(total_timesteps=total_timesteps,
                               callback=[progress_bar_callback, ml_callback, test_callback], log_interval=2_000)
